@@ -417,6 +417,44 @@ public class MainHook implements IXposedHookLoadPackage {
             XposedBridge.log(TAG + ": Hooked InAppBrowserActivity.onCreate()");
         } catch (Throwable ignored) {}
 
+        // ══════════════════════════════════════════════════════════════
+        // LAYER 6: Client-Side Account Attributes (ProductStateProto)
+        // ══════════════════════════════════════════════════════════════
+        try {
+            Class<?> pspClass = lpparam.classLoader.loadClass("com.spotify.remoteconfig.internal.ProductStateProto");
+            for (Method m : pspClass.getDeclaredMethods()) {
+                if (Map.class.isAssignableFrom(m.getReturnType()) && m.getParameterCount() == 0) {
+                    XposedBridge.hookMethod(m, new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) {
+                            try {
+                                Object result = param.getResult();
+                                if (result instanceof Map) {
+                                    @SuppressWarnings("unchecked")
+                                    Map<String, Object> origMap = (Map<String, Object>) result;
+                                    Map<String, Object> modMap = new LinkedHashMap<>(origMap);
+
+                                    overrideAttribute(modMap, "player-license", "on-demand");
+                                    overrideAttribute(modMap, "shuffle", Boolean.FALSE);
+                                    overrideAttribute(modMap, "on-demand", Boolean.TRUE);
+                                    overrideAttribute(modMap, "streaming", Boolean.TRUE);
+                                    overrideAttribute(modMap, "streaming-rules", "");
+                                    overrideAttribute(modMap, "nft-disabled", "1");
+                                    overrideAttribute(modMap, "pick-and-shuffle", Boolean.FALSE);
+
+                                    param.setResult(modMap);
+                                    Log.i(TAG, "ProductStateProto overridden to on-demand ad-free tier");
+                                }
+                            } catch (Throwable t) {
+                                Log.w(TAG, "ProductStateProto override error: " + t);
+                            }
+                        }
+                    });
+                    XposedBridge.log(TAG + ": Hooked ProductStateProto." + m.getName() + "()");
+                }
+            }
+        } catch (Throwable ignored) {}
+
         XposedBridge.log(TAG + ": All LSpot hooks successfully registered");
     }
 
@@ -445,6 +483,43 @@ public class MainHook implements IXposedHookLoadPackage {
         return null;
     }
 
+    private static void overrideAttribute(Map<String, Object> map, String key, Object val) {
+        try {
+            Object attr = map.get(key);
+            if (attr != null) {
+                Field fVal = null;
+                Field fCase = null;
+                Class<?> c = attr.getClass();
+                while (c != null && c != Object.class) {
+                    if (fVal == null) {
+                        try { fVal = c.getDeclaredField("value_"); } catch (Throwable ignored) {}
+                    }
+                    if (fCase == null) {
+                        try { fCase = c.getDeclaredField("valueCase_"); } catch (Throwable ignored) {}
+                    }
+                    c = c.getSuperclass();
+                }
+
+                int caseNum = 0;
+                try {
+                    if (val instanceof String) {
+                        caseNum = attr.getClass().getField("STRING_VALUE_FIELD_NUMBER").getInt(null);
+                    } else if (val instanceof Boolean) {
+                        caseNum = attr.getClass().getField("BOOL_VALUE_FIELD_NUMBER").getInt(null);
+                    }
+                } catch (Throwable ignored) {}
+
+                if (fVal != null) {
+                    fVal.setAccessible(true);
+                    fVal.set(attr, val);
+                }
+                if (fCase != null && caseNum > 0) {
+                    fCase.setAccessible(true);
+                    fCase.setInt(attr, caseNum);
+                }
+            }
+        } catch (Throwable ignored) {}
+    }
 
     private static Object emptyResponse(Object request, ClassLoader cl) {
         // Method 1: Using okhttp3.Response.Builder
