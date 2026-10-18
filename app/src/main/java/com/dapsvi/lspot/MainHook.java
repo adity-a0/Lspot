@@ -296,6 +296,29 @@ public class MainHook implements IXposedHookLoadPackage {
             XposedBridge.log(TAG + ": Hooked Interceptor.Chain.proceed()");
         } catch (Throwable ignored) {}
 
+        try {
+            Class<?> respClass = lpparam.classLoader.loadClass("okhttp3.Response");
+            for (Method m : respClass.getDeclaredMethods()) {
+                if ("close".equals(m.getName()) && m.getParameterCount() == 0) {
+                    XposedBridge.hookMethod(m, new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) {
+                            try {
+                                Object resp = param.thisObject;
+                                if (resp != null) {
+                                    Field f = resp.getClass().getDeclaredField("g");
+                                    f.setAccessible(true);
+                                    if (f.get(resp) == null) {
+                                        param.setResult(null);
+                                    }
+                                }
+                            } catch (Throwable ignored) {}
+                        }
+                    });
+                    XposedBridge.log(TAG + ": Hooked Response.close() null-safe guard");
+                }
+            }
+        } catch (Throwable ignored) {}
 
         XposedBridge.log(TAG + ": All LSpot hooks successfully registered");
     }
@@ -303,20 +326,98 @@ public class MainHook implements IXposedHookLoadPackage {
 
 
     private static Object emptyResponse(Object request, ClassLoader cl) {
+        // Method 1: Using okhttp3.Response.Builder
+        try {
+            Class<?> builderClass = cl.loadClass("okhttp3.Response$Builder");
+            Object builder = builderClass.getDeclaredConstructor().newInstance();
+
+            Object protocol = null;
+            try {
+                Class<?> protocolClass = cl.loadClass("okhttp3.Protocol");
+                Object[] protocols = (Object[]) protocolClass.getMethod("values").invoke(null);
+                if (protocols != null && protocols.length > 0) {
+                    protocol = protocols[0];
+                    for (Object p : protocols) {
+                        String ps = p.toString();
+                        if (ps.contains("1.1") || ps.equalsIgnoreCase("HTTP_1_1")) {
+                            protocol = p;
+                            break;
+                        }
+                    }
+                }
+            } catch (Throwable ignored) {}
+
+            setField(builder, "a", request);
+            if (protocol != null) setField(builder, "b", protocol);
+            setField(builder, "c", 200);
+            setField(builder, "d", "OK");
+
+            for (Method m : builderClass.getDeclaredMethods()) {
+                if (m.getParameterCount() == 0 && m.getReturnType().getName().endsWith("Response")) {
+                    m.setAccessible(true);
+                    Object resp = m.invoke(builder);
+                    if (resp != null) {
+                        return resp;
+                    }
+                }
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "Response$Builder creation error: " + t);
+        }
+
+        // Method 2: Unsafe direct allocation fallback
         try {
             Class<?> respClass = cl.loadClass("okhttp3.Response");
             Class<?> unsafeClass = Class.forName("sun.misc.Unsafe");
-            java.lang.reflect.Field theUnsafe = unsafeClass.getDeclaredField("theUnsafe");
+            Field theUnsafe = unsafeClass.getDeclaredField("theUnsafe");
             theUnsafe.setAccessible(true);
             Object unsafe = theUnsafe.get(null);
-            java.lang.reflect.Method allocateInstance = unsafeClass.getMethod("allocateInstance", Class.class);
+            Method allocateInstance = unsafeClass.getMethod("allocateInstance", Class.class);
             Object resp = allocateInstance.invoke(unsafe, respClass);
 
+            Object protocol = null;
+            try {
+                Class<?> protocolClass = cl.loadClass("okhttp3.Protocol");
+                Object[] protocols = (Object[]) protocolClass.getMethod("values").invoke(null);
+                if (protocols != null && protocols.length > 0) {
+                    protocol = protocols[0];
+                }
+            } catch (Throwable ignored) {}
+
+            Object emptyBody = null;
+            try {
+                Class<?> bodyClass = cl.loadClass("okhttp3.ResponseBody");
+                for (Field f : bodyClass.getDeclaredFields()) {
+                    if (bodyClass.isAssignableFrom(f.getType())) {
+                        f.setAccessible(true);
+                        emptyBody = f.get(null);
+                        if (emptyBody != null) break;
+                    }
+                }
+            } catch (Throwable ignored) {}
+
+            Object emptyHeaders = null;
+            try {
+                Class<?> headersClass = cl.loadClass("okhttp3.Headers");
+                for (Field f : headersClass.getDeclaredFields()) {
+                    if (headersClass.isAssignableFrom(f.getType())) {
+                        f.setAccessible(true);
+                        emptyHeaders = f.get(null);
+                        if (emptyHeaders != null) break;
+                    }
+                }
+            } catch (Throwable ignored) {}
+
             setField(resp, "a", request);
+            if (protocol != null) setField(resp, "b", protocol);
             setField(resp, "c", "OK");
-            setField(resp, "d", 204);
+            setField(resp, "d", 200);
+            if (emptyHeaders != null) setField(resp, "f", emptyHeaders);
+            if (emptyBody != null) setField(resp, "g", emptyBody);
+
             return resp;
         } catch (Throwable t) {
+            Log.w(TAG, "emptyResponse Unsafe fallback error: " + t);
             return null;
         }
     }
