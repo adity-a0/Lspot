@@ -320,9 +320,130 @@ public class MainHook implements IXposedHookLoadPackage {
             }
         } catch (Throwable ignored) {}
 
+        // ══════════════════════════════════════════════════════════════
+        // LAYER 4: Audio Ad & Track Queue Protection
+        // ══════════════════════════════════════════════════════════════
+        String[] playerBuilders = {
+            "com.spotify.player.model.AutoValue_PlayerState$Builder",
+            "com.spotify.player.model.AutoValue_PlayerQueue$Builder"
+        };
+        for (String className : playerBuilders) {
+            try {
+                Class<?> clazz = lpparam.classLoader.loadClass(className);
+                for (Method m : clazz.getDeclaredMethods()) {
+                    if ("track".equals(m.getName()) && m.getParameterCount() == 1) {
+                        XposedBridge.hookMethod(m, new XC_MethodHook() {
+                            @Override
+                            protected void beforeHookedMethod(MethodHookParam param) {
+                                Object track = param.args[0];
+                                String uri = getTrackUri(track);
+                                if (uri != null && (uri.startsWith("spotify:ad") || uri.contains(":ad:"))) {
+                                    Log.i(TAG, "FILTERED ad track from player: " + uri);
+                                    param.setResult(param.thisObject);
+                                }
+                            }
+                        });
+                        XposedBridge.log(TAG + ": Hooked " + className + ".track()");
+                    }
+                    if ("adBreakContext".equals(m.getName())) {
+                        XposedBridge.hookMethod(m, new XC_MethodHook() {
+                            @Override
+                            protected void beforeHookedMethod(MethodHookParam param) {
+                                Log.i(TAG, "SKIPPED adBreakContext");
+                                param.setResult(param.thisObject);
+                            }
+                        });
+                        XposedBridge.log(TAG + ": Hooked " + className + ".adBreakContext()");
+                    }
+                }
+            } catch (Throwable t) {
+                XposedBridge.log(TAG + ": Player builder hook skipped for " + className + ": " + t);
+            }
+        }
+
+        try {
+            Class<?> desClass = lpparam.classLoader.loadClass("com.spotify.player.model.PlayerState_Deserializer");
+            for (Method m : desClass.getDeclaredMethods()) {
+                if ("deserializeAdBreakContext".equals(m.getName())) {
+                    XposedBridge.hookMethod(m, new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) {
+                            param.setResult(null);
+                        }
+                    });
+                    XposedBridge.log(TAG + ": Hooked deserializeAdBreakContext -> null");
+                }
+            }
+        } catch (Throwable ignored) {}
+
+        // ══════════════════════════════════════════════════════════════
+        // LAYER 5: Visual Ad Activities Dismissal
+        // ══════════════════════════════════════════════════════════════
+        try {
+            Class<?> displayAdClass = lpparam.classLoader.loadClass("com.spotify.adsdisplay.display.DisplayAdActivity");
+            Method onCreate = displayAdClass.getDeclaredMethod("onCreate", Bundle.class);
+            onCreate.setAccessible(true);
+            XposedBridge.hookMethod(onCreate, new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    try {
+                        Activity act = (Activity) param.thisObject;
+                        Log.i(TAG, "Dismissing DisplayAdActivity");
+                        act.finish();
+                    } catch (Throwable t) {
+                        Log.w(TAG, "DisplayAdActivity finish error: " + t);
+                    }
+                }
+            });
+            XposedBridge.log(TAG + ": Hooked DisplayAdActivity.onCreate()");
+        } catch (Throwable ignored) {}
+
+        try {
+            Class<?> inAppBrowser = lpparam.classLoader.loadClass("com.spotify.adsdisplay.browser.inapp.InAppBrowserActivity");
+            Method onCreate = inAppBrowser.getDeclaredMethod("onCreate", Bundle.class);
+            onCreate.setAccessible(true);
+            XposedBridge.hookMethod(onCreate, new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    try {
+                        Activity act = (Activity) param.thisObject;
+                        Log.i(TAG, "Dismissing InAppBrowserActivity");
+                        act.finish();
+                    } catch (Throwable t) {
+                        Log.w(TAG, "InAppBrowserActivity finish error: " + t);
+                    }
+                }
+            });
+            XposedBridge.log(TAG + ": Hooked InAppBrowserActivity.onCreate()");
+        } catch (Throwable ignored) {}
+
         XposedBridge.log(TAG + ": All LSpot hooks successfully registered");
     }
 
+    private static String getTrackUri(Object obj) {
+        if (obj == null) return null;
+        try {
+            for (Method m : obj.getClass().getMethods()) {
+                if (("uri".equals(m.getName()) || "getUri".equals(m.getName())) && m.getParameterCount() == 0) {
+                    m.setAccessible(true);
+                    Object res = m.invoke(obj);
+                    if (res != null) return res.toString();
+                }
+            }
+            Class<?> c = obj.getClass();
+            while (c != null && c != Object.class) {
+                for (Field f : c.getDeclaredFields()) {
+                    if (f.getName().toLowerCase().contains("uri") && f.getType() == String.class) {
+                        f.setAccessible(true);
+                        Object res = f.get(obj);
+                        if (res != null) return res.toString();
+                    }
+                }
+                c = c.getSuperclass();
+            }
+        } catch (Throwable ignored) {}
+        return null;
+    }
 
 
     private static Object emptyResponse(Object request, ClassLoader cl) {
