@@ -1,15 +1,24 @@
 package com.dapsvi.lspot;
 
+import android.app.Activity;
+import android.os.Bundle;
 import android.util.Log;
 
+import java.io.IOException;
+import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.net.InetAddress;
+import java.net.URL;
 import java.util.Arrays;
-import java.util.regex.Pattern;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.Set;
 
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
-import de.robv.android.xposed.XposedHelpers;
 import de.robv.android.xposed.callbacks.XC_LoadPackage.LoadPackageParam;
 
 public class MainHook implements IXposedHookLoadPackage {
@@ -17,277 +26,83 @@ public class MainHook implements IXposedHookLoadPackage {
     private static final String TAG = "LSpot";
     private static final String TARGET = "com.spotify.music";
 
-    private static final Pattern[] BLOCKED_PATTERNS = {
-        Pattern.compile("https://spclient\\.wg\\.spotify\\.com/ads/.*"),
-        Pattern.compile("https://spclient\\.wg\\.spotify\\.com/ad-logic/.*"),
-        Pattern.compile("https://spclient\\.wg\\.spotify\\.com/gabo-receiver-service/.*"),
+    private static final Set<String> BLOCKED_DOMAINS = new HashSet<>(Arrays.asList(
+        "ads.spotify.com",
+        "audio-ak-spotify-com.akamaized.net",
+        "audio2.spotify.com",
+        "adstats.spotify.com",
+        "adeventtracker.spotify.com",
+        "sponsored-recommendations.spotify.com",
+        "desktop.spotify.com",
+        "weblb-wg.gslb.spotify.com",
+        "redirect.spotify.net",
+        "analytics.spotify.com",
+        "tracking.spotify.com",
+        "log.spotify.com",
+        "crashdump.spotify.com",
+        "dealer.g2.spotify.com",
+        "gew1-dealer.g2.spotify.com",
+        "gew1-dealer-ssl.spotify.com",
+        "pagead2.googlesyndication.com",
+        "bs.serving-sys.com",
+        "bounceexchange.com",
+        "sb.scorecardresearch.com",
+        "b.scorecardresearch.com",
+        "video-fa.scdn.co",
+        "audio-fa.scdn.co"
+    ));
+
+    private static final String[] BLOCKED_URL_KEYWORDS = {
+        "/ads/",
+        "/ad-logic/",
+        "/ad-monetization/",
+        "/v1/ads/",
+        "/v2/ads/",
+        "/v3/ads/",
+        "/ads?",
+        "/ad-express-service/",
+        "/ad-feedback-service/",
+        "/ad-sponsor-service/",
+        "/ad-experience-service/",
+        "/commercial-break/",
+        "/audio-ad-reward/",
+        "/gabo-receiver-service/",
+        "/in-app-messages/",
+        "/desktop-omni-ads/",
+        "ads.spotify.com",
+        "adstats.spotify.com",
+        "adeventtracker.spotify.com",
+        "video-fa.scdn.co",
+        "audio-fa.scdn.co",
+        "spotify:ad:"
     };
 
-    @Override
-    public void handleLoadPackage(LoadPackageParam lpparam) throws Throwable {
-        if (!lpparam.packageName.equals(TARGET)) return;
-
-        XposedBridge.log(TAG + ": Loading for " + lpparam.packageName);
-
-        try {
-            Class<?> builderClass = lpparam.classLoader.loadClass("okhttp3.OkHttpClient$Builder");
-            StringBuilder sb = new StringBuilder();
-            sb.append(TAG).append(": Builder methods:");
-            for (Method m : builderClass.getDeclaredMethods()) {
-                sb.append("\n  ").append(m.getName())
-                  .append("(").append(Arrays.toString(m.getParameterTypes())).append(")")
-                  .append(" -> ").append(m.getReturnType().getSimpleName());
-            }
-            XposedBridge.log(sb.toString());
-        } catch (Throwable e) {
-            XposedBridge.log(TAG + ": Builder enum failed: " + e.getMessage());
+    private static boolean isBlockedHost(String host) {
+        if (host == null) return false;
+        String h = host.toLowerCase();
+        for (String d : BLOCKED_DOMAINS) {
+            if (h.equals(d) || h.endsWith("." + d)) return true;
         }
-
-        try {
-            Class<?> ricClass = lpparam.classLoader.loadClass("okhttp3.internal.http.RealInterceptorChain");
-            StringBuilder sb = new StringBuilder();
-            sb.append(TAG).append(": RIC methods:");
-            for (Method m : ricClass.getDeclaredMethods()) {
-                sb.append("\n  ").append(m.getName())
-                  .append("(").append(Arrays.toString(m.getParameterTypes())).append(")")
-                  .append(" -> ").append(m.getReturnType().getSimpleName());
-            }
-            XposedBridge.log(sb.toString());
-        } catch (Throwable e) {
-            XposedBridge.log(TAG + ": RIC enum failed: " + e.getMessage());
-        }
-
-        boolean hooked = false;
-
-        try {
-            String[] methodNames = {"build", "get", "call", "create"};
-            final Class<?> interceptorClass = lpparam.classLoader.loadClass("okhttp3.Interceptor");
-
-            for (String name : methodNames) {
-                if (hooked) break;
-                try {
-                    XposedHelpers.findAndHookMethod(
-                        "okhttp3.OkHttpClient$Builder",
-                        lpparam.classLoader,
-                        name,
-                        new XC_MethodHook() {
-                            @Override
-                            protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                                try {
-                                    Object client = param.getResult();
-                                    if (client == null) return;
-
-                                    Object blocker = java.lang.reflect.Proxy.newProxyInstance(
-                                        lpparam.classLoader,
-                                        new Class<?>[]{interceptorClass},
-                                        (proxy, method, args) -> {
-                                            try {
-                                                if ("intercept".equals(method.getName()) && args != null && args.length == 1) {
-                                                    Object chain = args[0];
-                                                    Method reqMethod = chain.getClass().getMethod("request");
-                                                    Object request = reqMethod.invoke(chain);
-                                                    String url = getRequestUrl(request);
-                                                    if (url != null) {
-                                                        for (Pattern p : BLOCKED_PATTERNS) {
-                                                            if (p.matcher(url).matches()) {
-                                                                Log.i(TAG, "Blocked: " + url);
-                                                                return emptyResponse(request, lpparam.classLoader);
-                                                            }
-                                                        }
-                                                    }
-                                                    Method proceedMethod = chain.getClass().getMethod("proceed", request.getClass());
-                                                    return proceedMethod.invoke(chain, request);
-                                                }
-                                            } catch (Throwable ignored) {}
-                                            String n = method.getName();
-                                            if (n.equals("toString")) return "SpotifyAdBlocker";
-                                            if (n.equals("hashCode")) return System.identityHashCode(proxy);
-                                            if (n.equals("equals")) return proxy == args[0];
-                                            return null;
-                                        });
-
-                                    try {
-                                        client.getClass().getMethod("addInterceptor", interceptorClass)
-                                            .invoke(client, blocker);
-                                        XposedBridge.log(TAG + ": Interceptor added");
-                                    } catch (NoSuchMethodException ignored) {
-                                        try {
-                                            client.getClass().getMethod("addNetworkInterceptor", interceptorClass)
-                                                .invoke(client, blocker);
-                                            XposedBridge.log(TAG + ": Net interceptor added");
-                                        } catch (NoSuchMethodException ignored2) {}
-                                    }
-                                } catch (Throwable ignored) {}
-                            }
-                        }
-                    );
-                    XposedBridge.log(TAG + ": Hooked Builder." + name);
-                    hooked = true;
-                } catch (Throwable ignored) {}
-            }
-
-            if (!hooked) {
-                Class<?> builderClass = lpparam.classLoader.loadClass("okhttp3.OkHttpClient$Builder");
-                for (Method m : builderClass.getDeclaredMethods()) {
-                    if (hooked) break;
-                    if (m.getParameterCount() > 0) continue;
-                    try {
-                        XposedHelpers.findAndHookMethod(
-                            "okhttp3.OkHttpClient$Builder",
-                            lpparam.classLoader,
-                            m.getName(),
-                            new XC_MethodHook() {
-                                @Override
-                                protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                                    try {
-                                        Object client = param.getResult();
-                                        if (client == null) return;
-                                        Object blocker = java.lang.reflect.Proxy.newProxyInstance(
-                                            lpparam.classLoader,
-                                            new Class<?>[]{interceptorClass},
-                                            (proxy, method, args) -> {
-                                                try {
-                                                    if ("intercept".equals(method.getName()) && args != null && args.length == 1) {
-                                                        Object chain = args[0];
-                                                        Method reqMethod = chain.getClass().getMethod("request");
-                                                        Object request = reqMethod.invoke(chain);
-                                                        Method urlMethod = request.getClass().getMethod("url");
-                                                        Object httpUrl = urlMethod.invoke(request);
-                                                        String url = httpUrl.toString();
-                                                        for (Pattern p : BLOCKED_PATTERNS) {
-                                                            if (p.matcher(url).matches()) {
-                                                                Log.i(TAG, "Blocked: " + url);
-                                                                return emptyResponse(request, lpparam.classLoader);
-                                                            }
-                                                        }
-                                                        Method proceedMethod = chain.getClass().getMethod("proceed", request.getClass());
-                                                        return proceedMethod.invoke(chain, request);
-                                                    }
-                                                } catch (Throwable ignored) {}
-                                                String n = method.getName();
-                                                if (n.equals("toString")) return "SpotifyAdBlocker";
-                                                if (n.equals("hashCode")) return System.identityHashCode(proxy);
-                                                if (n.equals("equals")) return proxy == args[0];
-                                                return null;
-                                            });
-                                        try {
-                                            client.getClass().getMethod("addInterceptor", interceptorClass).invoke(client, blocker);
-                                        } catch (NoSuchMethodException ignored) {
-                                            try {
-                                                client.getClass().getMethod("addNetworkInterceptor", interceptorClass).invoke(client, blocker);
-                                            } catch (NoSuchMethodException ignored2) {}
-                                        }
-                                    } catch (Throwable ignored) {}
-                                }
-                            }
-                        );
-                        XposedBridge.log(TAG + ": Hooked Builder." + m.getName());
-                        hooked = true;
-                    } catch (Throwable ignored) {}
-                }
-            }
-        } catch (Throwable e) {
-            XposedBridge.log(TAG + ": Builder hook failed: " + e.getMessage());
-        }
-
-        if (!hooked) {
-            try {
-                Class<?> ricClass = lpparam.classLoader.loadClass("okhttp3.internal.http.RealInterceptorChain");
-                Class<?> requestClass = lpparam.classLoader.loadClass("okhttp3.Request");
-                String ricMethod = null;
-                for (Method m : ricClass.getDeclaredMethods()) {
-                    if (m.getParameterCount() == 1
-                        && m.getParameterTypes()[0].equals(requestClass)
-                        && m.getReturnType().getName().equals("okhttp3.Response")
-                        && !m.getName().startsWith("lambda$")) {
-                        ricMethod = m.getName();
-                        break;
-                    }
-                }
-
-                if (ricMethod != null) {
-                    try {
-                        XposedHelpers.findAndHookMethod(
-                            "okhttp3.internal.http.RealInterceptorChain",
-                            lpparam.classLoader,
-                            ricMethod,
-                            requestClass,
-                            new XC_MethodHook() {
-                                @Override
-                                protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                                    try {
-                                        Object request = param.args[0];
-                                        if (request == null) return;
-                                        String url = getRequestUrl(request);
-                                        if (url != null) {
-                                            for (Pattern p : BLOCKED_PATTERNS) {
-                                                if (p.matcher(url).matches()) {
-                                                    Log.i(TAG, "Blocked: " + url);
-                                                    param.setResult(emptyResponse(request, lpparam.classLoader));
-                                                    return;
-                                                }
-                                            }
-                                        }
-                                    } catch (Throwable ignored) {}
-                                }
-                            }
-                        );
-                        XposedBridge.log(TAG + ": Hooked RealInterceptorChain." + ricMethod + "() (dynamic)");
-                        hooked = true;
-                    } catch (Throwable ricHookError) {
-                        XposedBridge.log(TAG + ": RIC hook failed (inner): " + ricHookError.getMessage());
-                    }
-                } else {
-                    XposedBridge.log(TAG + ": No matching method found on RealInterceptorChain");
-                }
-            } catch (Throwable e) {
-                XposedBridge.log(TAG + ": RIC dynamic hook failed: " + e.getMessage());
-            }
-        }
-
-        if (!hooked) {
-            try {
-                Class<?> urlClass = lpparam.classLoader.loadClass("java.net.URL");
-                Method hookConstructors = XposedBridge.class.getMethod(
-                    "hookAllConstructors", Class.class, XC_MethodHook.class);
-                hookConstructors.invoke(null, urlClass, new XC_MethodHook() {
-                    @Override
-                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                        try {
-                            if (param.args.length >= 1 && param.args[0] instanceof String) {
-                                String str = (String) param.args[0];
-                                for (Pattern p : BLOCKED_PATTERNS) {
-                                    if (p.matcher(str).matches()) {
-                                        Log.i(TAG, "URL blocked: " + str);
-                                        param.args[0] = "http://127.0.0.1/blocked";
-                                        break;
-                                    }
-                                }
-                            }
-                        } catch (Throwable ignored) {}
-                    }
-                });
-                XposedBridge.log(TAG + ": Hooked java.net.URL constructors (JVM level)");
-                hooked = true;
-            } catch (Throwable e) {
-                XposedBridge.log(TAG + ": URL hook failed: " + e.getMessage());
-            }
-        }
-
-        if (hooked) {
-            XposedBridge.log(TAG + ": Hook installed successfully");
-        } else {
-            XposedBridge.log(TAG + ": ALL HOOK METHODS FAILED");
-        }
+        return false;
     }
 
+    private static boolean isBlockedUrl(String url) {
+        if (url == null) return false;
+        String u = url.toLowerCase();
+        for (String kw : BLOCKED_URL_KEYWORDS) {
+            if (u.contains(kw)) return true;
+        }
+        return false;
+    }
 
     private static String getRequestUrl(Object request) {
         if (request == null) return null;
+
+        // 1. Inspect fields of type okhttp3.HttpUrl
         try {
             Class<?> c = request.getClass();
             while (c != null && c != Object.class) {
-                for (java.lang.reflect.Field f : c.getDeclaredFields()) {
+                for (Field f : c.getDeclaredFields()) {
                     if (f.getType().getName().endsWith("HttpUrl")) {
                         f.setAccessible(true);
                         Object val = f.get(request);
@@ -298,6 +113,7 @@ public class MainHook implements IXposedHookLoadPackage {
             }
         } catch (Throwable ignored) {}
 
+        // 2. Parse from toString(): Request{method=GET, url=https://...}
         try {
             String s = request.toString();
             if (s != null && s.contains("url=")) {
@@ -308,8 +124,9 @@ public class MainHook implements IXposedHookLoadPackage {
             }
         } catch (Throwable ignored) {}
 
+        // 3. Fallback to any 0-arg method returning HttpUrl
         try {
-            for (java.lang.reflect.Method m : request.getClass().getMethods()) {
+            for (Method m : request.getClass().getMethods()) {
                 if (m.getReturnType().getName().endsWith("HttpUrl") && m.getParameterCount() == 0) {
                     m.setAccessible(true);
                     Object val = m.invoke(request);
@@ -317,26 +134,206 @@ public class MainHook implements IXposedHookLoadPackage {
                 }
             }
         } catch (Throwable ignored) {}
-        return null;
+
+        return request.toString();
     }
 
-    private static Object emptyResponse(Object request, ClassLoader cl) throws Exception {
-        Class<?> respBuilderClass = cl.loadClass("okhttp3.Response$Builder");
-        Class<?> protocolClass = cl.loadClass("okhttp3.Protocol");
-        Class<?> bodyClass = cl.loadClass("okhttp3.ResponseBody");
+    @Override
+    public void handleLoadPackage(LoadPackageParam lpparam) throws Throwable {
+        if (!TARGET.equals(lpparam.packageName)) return;
 
-        Object http11 = protocolClass.getField("HTTP_1_1").get(null);
-        Object builder = respBuilderClass.getDeclaredConstructor().newInstance();
+        XposedBridge.log(TAG + ": Initializing hooks for " + lpparam.packageName);
 
-        respBuilderClass.getMethod("request", request.getClass()).invoke(builder, request);
-        respBuilderClass.getMethod("protocol", protocolClass).invoke(builder, http11);
-        respBuilderClass.getMethod("code", int.class).invoke(builder, 200);
-        respBuilderClass.getMethod("message", String.class).invoke(builder, "OK");
-        respBuilderClass.getMethod("body", bodyClass).invoke(builder,
-            bodyClass.getMethod("create",
-                cl.loadClass("okhttp3.MediaType"), byte[].class)
-                .invoke(null, (Object) null, new byte[0]));
+        // ══════════════════════════════════════════════════════════════
+        // LAYER 1: DNS Resolution Sinkhole (Ad domains -> 127.0.0.1)
+        // ══════════════════════════════════════════════════════════════
+        try {
+            Method mAll = InetAddress.class.getMethod("getAllByName", String.class);
+            XposedBridge.hookMethod(mAll, new XC_MethodHook() {
+                @Override
+                protected void beforeHookedMethod(MethodHookParam param) {
+                    String host = (String) param.args[0];
+                    if (isBlockedHost(host)) {
+                        Log.i(TAG, "DNS BLOCKED getAllByName: " + host);
+                        try {
+                            InetAddress loopback = InetAddress.getByAddress(host, new byte[]{127, 0, 0, 1});
+                            param.setResult(new InetAddress[]{loopback});
+                        } catch (Throwable ignored) {}
+                    }
+                }
+            });
+            XposedBridge.log(TAG + ": Hooked InetAddress.getAllByName");
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + ": InetAddress.getAllByName error: " + t.getMessage());
+        }
 
-        return respBuilderClass.getMethod("build").invoke(builder);
+        try {
+            Method mOne = InetAddress.class.getMethod("getByName", String.class);
+            XposedBridge.hookMethod(mOne, new XC_MethodHook() {
+                @Override
+                protected void beforeHookedMethod(MethodHookParam param) {
+                    String host = (String) param.args[0];
+                    if (isBlockedHost(host)) {
+                        Log.i(TAG, "DNS BLOCKED getByName: " + host);
+                        try {
+                            InetAddress loopback = InetAddress.getByAddress(host, new byte[]{127, 0, 0, 1});
+                            param.setResult(loopback);
+                        } catch (Throwable ignored) {}
+                    }
+                }
+            });
+            XposedBridge.log(TAG + ": Hooked InetAddress.getByName");
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + ": InetAddress.getByName error: " + t.getMessage());
+        }
+
+        try {
+            Class<?> dnsClass = lpparam.classLoader.loadClass("okhttp3.Dns");
+            Object systemDns = dnsClass.getField("SYSTEM").get(null);
+            if (systemDns != null) {
+                Method lookup = systemDns.getClass().getMethod("lookup", String.class);
+                XposedBridge.hookMethod(lookup, new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) {
+                        String host = (String) param.args[0];
+                        if (isBlockedHost(host)) {
+                            Log.i(TAG, "OkHttp Dns BLOCKED: " + host);
+                            try {
+                                InetAddress loopback = InetAddress.getByAddress(host, new byte[]{127, 0, 0, 1});
+                                param.setResult(Collections.singletonList(loopback));
+                            } catch (Throwable ignored) {}
+                        }
+                    }
+                });
+                XposedBridge.log(TAG + ": Hooked OkHttp Dns.SYSTEM.lookup");
+            }
+        } catch (Throwable ignored) {}
+
+        // ══════════════════════════════════════════════════════════════
+        // LAYER 2: URL Connection Fallback
+        // ══════════════════════════════════════════════════════════════
+        try {
+            Method openConn = URL.class.getMethod("openConnection");
+            XposedBridge.hookMethod(openConn, new XC_MethodHook() {
+                @Override
+                protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                    URL u = (URL) param.thisObject;
+                    if (u != null && isBlockedHost(u.getHost())) {
+                        Log.i(TAG, "URL.openConnection BLOCKED: " + u);
+                        param.setThrowable(new IOException("Blocked ad host: " + u.getHost()));
+                    }
+                }
+            });
+            XposedBridge.log(TAG + ": Hooked URL.openConnection");
+        } catch (Throwable ignored) {}
+
+        // ══════════════════════════════════════════════════════════════
+        // LAYER 3: OkHttp Request Interception (RealInterceptorChain & Chain)
+        // ══════════════════════════════════════════════════════════════
+        try {
+            Class<?> reqClass = lpparam.classLoader.loadClass("okhttp3.Request");
+            Class<?> ricClass = lpparam.classLoader.loadClass("okhttp3.internal.http.RealInterceptorChain");
+
+            for (Method m : ricClass.getDeclaredMethods()) {
+                if (m.getParameterCount() == 1
+                    && m.getParameterTypes()[0].equals(reqClass)
+                    && "okhttp3.Response".equals(m.getReturnType().getName())
+                    && !m.getName().startsWith("lambda$")) {
+
+                    XposedBridge.hookMethod(m, new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) {
+                            try {
+                                Object request = param.args[0];
+                                if (request == null) return;
+                                String url = getRequestUrl(request);
+                                if (url != null && isBlockedUrl(url)) {
+                                    Log.i(TAG, "OkHttp Request BLOCKED: " + url);
+                                    Object empty = emptyResponse(request, lpparam.classLoader);
+                                    if (empty != null) {
+                                        param.setResult(empty);
+                                    } else {
+                                        param.setThrowable(new IOException("Blocked by LSpot: " + url));
+                                    }
+                                }
+                            } catch (Throwable t) {
+                                Log.w(TAG, "RIC check error: " + t);
+                            }
+                        }
+                    });
+                    XposedBridge.log(TAG + ": Hooked RealInterceptorChain." + m.getName() + "()");
+                }
+            }
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + ": RealInterceptorChain hook failed: " + t.getMessage());
+        }
+
+        try {
+            Class<?> reqClass = lpparam.classLoader.loadClass("okhttp3.Request");
+            Class<?> chainClass = lpparam.classLoader.loadClass("okhttp3.Interceptor$Chain");
+            Method proceed = chainClass.getMethod("proceed", reqClass);
+            XposedBridge.hookMethod(proceed, new XC_MethodHook() {
+                @Override
+                protected void beforeHookedMethod(MethodHookParam param) {
+                    try {
+                        Object request = param.args[0];
+                        if (request == null) return;
+                        String url = getRequestUrl(request);
+                        if (url != null && isBlockedUrl(url)) {
+                            Log.i(TAG, "Chain.proceed BLOCKED: " + url);
+                            Object empty = emptyResponse(request, lpparam.classLoader);
+                            if (empty != null) {
+                                param.setResult(empty);
+                            } else {
+                                param.setThrowable(new IOException("Blocked by LSpot: " + url));
+                            }
+                        }
+                    } catch (Throwable t) {
+                        Log.w(TAG, "Chain.proceed check error: " + t);
+                    }
+                }
+            });
+            XposedBridge.log(TAG + ": Hooked Interceptor.Chain.proceed()");
+        } catch (Throwable ignored) {}
+
+
+        XposedBridge.log(TAG + ": All LSpot hooks successfully registered");
+    }
+
+
+
+    private static Object emptyResponse(Object request, ClassLoader cl) {
+        try {
+            Class<?> respClass = cl.loadClass("okhttp3.Response");
+            Class<?> unsafeClass = Class.forName("sun.misc.Unsafe");
+            java.lang.reflect.Field theUnsafe = unsafeClass.getDeclaredField("theUnsafe");
+            theUnsafe.setAccessible(true);
+            Object unsafe = theUnsafe.get(null);
+            java.lang.reflect.Method allocateInstance = unsafeClass.getMethod("allocateInstance", Class.class);
+            Object resp = allocateInstance.invoke(unsafe, respClass);
+
+            setField(resp, "a", request);
+            setField(resp, "c", "OK");
+            setField(resp, "d", 204);
+            return resp;
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    private static void setField(Object obj, String name, Object val) {
+        try {
+            Class<?> c = obj.getClass();
+            while (c != null && c != Object.class) {
+                try {
+                    Field f = c.getDeclaredField(name);
+                    f.setAccessible(true);
+                    f.set(obj, val);
+                    return;
+                } catch (NoSuchFieldException e) {
+                    c = c.getSuperclass();
+                }
+            }
+        } catch (Throwable ignored) {}
     }
 }
