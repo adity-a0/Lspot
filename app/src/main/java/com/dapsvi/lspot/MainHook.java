@@ -86,13 +86,13 @@ public class MainHook implements IXposedHookLoadPackage {
                                                     Object chain = args[0];
                                                     Method reqMethod = chain.getClass().getMethod("request");
                                                     Object request = reqMethod.invoke(chain);
-                                                    Method urlMethod = request.getClass().getMethod("url");
-                                                    Object httpUrl = urlMethod.invoke(request);
-                                                    String url = httpUrl.toString();
-                                                    for (Pattern p : BLOCKED_PATTERNS) {
-                                                        if (p.matcher(url).matches()) {
-                                                            Log.i(TAG, "Blocked: " + url);
-                                                            return emptyResponse(request, lpparam.classLoader);
+                                                    String url = getRequestUrl(request);
+                                                    if (url != null) {
+                                                        for (Pattern p : BLOCKED_PATTERNS) {
+                                                            if (p.matcher(url).matches()) {
+                                                                Log.i(TAG, "Blocked: " + url);
+                                                                return emptyResponse(request, lpparam.classLoader);
+                                                            }
                                                         }
                                                     }
                                                     Method proceedMethod = chain.getClass().getMethod("proceed", request.getClass());
@@ -218,14 +218,14 @@ public class MainHook implements IXposedHookLoadPackage {
                                     try {
                                         Object request = param.args[0];
                                         if (request == null) return;
-                                        Method urlMethod = request.getClass().getMethod("url");
-                                        Object httpUrl = urlMethod.invoke(request);
-                                        String url = httpUrl.toString();
-                                        for (Pattern p : BLOCKED_PATTERNS) {
-                                            if (p.matcher(url).matches()) {
-                                                Log.i(TAG, "Blocked: " + url);
-                                                param.setResult(emptyResponse(request, lpparam.classLoader));
-                                                return;
+                                        String url = getRequestUrl(request);
+                                        if (url != null) {
+                                            for (Pattern p : BLOCKED_PATTERNS) {
+                                                if (p.matcher(url).matches()) {
+                                                    Log.i(TAG, "Blocked: " + url);
+                                                    param.setResult(emptyResponse(request, lpparam.classLoader));
+                                                    return;
+                                                }
                                             }
                                         }
                                     } catch (Throwable ignored) {}
@@ -279,6 +279,45 @@ public class MainHook implements IXposedHookLoadPackage {
         } else {
             XposedBridge.log(TAG + ": ALL HOOK METHODS FAILED");
         }
+    }
+
+
+    private static String getRequestUrl(Object request) {
+        if (request == null) return null;
+        try {
+            Class<?> c = request.getClass();
+            while (c != null && c != Object.class) {
+                for (java.lang.reflect.Field f : c.getDeclaredFields()) {
+                    if (f.getType().getName().endsWith("HttpUrl")) {
+                        f.setAccessible(true);
+                        Object val = f.get(request);
+                        if (val != null) return val.toString();
+                    }
+                }
+                c = c.getSuperclass();
+            }
+        } catch (Throwable ignored) {}
+
+        try {
+            String s = request.toString();
+            if (s != null && s.contains("url=")) {
+                int start = s.indexOf("url=") + 4;
+                int end = s.indexOf(',', start);
+                if (end == -1) end = s.indexOf('}', start);
+                if (end > start) return s.substring(start, end).trim();
+            }
+        } catch (Throwable ignored) {}
+
+        try {
+            for (java.lang.reflect.Method m : request.getClass().getMethods()) {
+                if (m.getReturnType().getName().endsWith("HttpUrl") && m.getParameterCount() == 0) {
+                    m.setAccessible(true);
+                    Object val = m.invoke(request);
+                    if (val != null) return val.toString();
+                }
+            }
+        } catch (Throwable ignored) {}
+        return null;
     }
 
     private static Object emptyResponse(Object request, ClassLoader cl) throws Exception {
