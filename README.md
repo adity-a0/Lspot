@@ -33,6 +33,11 @@ apksigner sign --ks your.keystore --ks-key-alias your-alias \
   --out LSpot.apk app/build/outputs/apk/release/app-release-unsigned.apk
 ```
 
+## Credits
+
+- Originally created by [dapsvi](https://codeberg.org/dapsvi) on Codeberg ([dapsvi/LSpot](https://codeberg.org/dapsvi/LSpot)).
+- Official repository: [com.dapsvi.lspot](https://github.com/Xposed-Modules-Repo/com.dapsvi.lspot) on the Xposed Modules Repo.
+
 ## License
 
 GPL-3.0
