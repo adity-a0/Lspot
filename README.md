@@ -2,6 +2,9 @@
 
 An LSPosed module that blocks ads in Spotify by intercepting OkHttp requests to ad endpoints.
 
+
+## CURRENT SUPPORT VERSION: 9.1.64.1676
+
 ## How it works
 
 Hooks `OkHttpClient.Builder.build()` at runtime and injects a dynamic interceptor that returns empty 200 OK responses for ad requests. No APK modification, all in-memory.
